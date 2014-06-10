@@ -168,7 +168,7 @@ bool MmsHelper::sendReadReport(int id)
     }
 
     QVariantList args;
-    args << id << imsi << event.mmsId() << event.remoteUid() << 0;
+    args << id << imsi << event.mmsId() << event.recipients().value(0).remoteUid() << 0;
     QDBusMessage method = QDBusMessage::createMethodCall(MMS_ENGINE_SERVICE, MMS_ENGINE_PATH, MMS_ENGINE_INTERFACE, "sendReadReport");
     method.setArguments(args);
     QDBusConnection::systemBus().asyncCall(method);

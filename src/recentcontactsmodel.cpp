@@ -36,7 +36,7 @@ using namespace CommHistory;
 
 static int eventContact(const Event &event)
 {
-    return event.contacts().isEmpty() ? 0 : event.contacts().first().first;
+    return event.recipients().contactIds().value(0);
 }
 
 class RecentContactsModelPrivate : public EventModelPrivate {
@@ -54,10 +54,7 @@ public:
     virtual bool fillModel(int start, int end, QList<Event> events);
     virtual void prependEvents(QList<Event> events);
 
-    void slotContactUpdated(quint32 localId,
-                            const QString &contactName,
-                            const QList<ContactAddress> &contactAddresses);
-    void slotContactRemoved(quint32 localId);
+    virtual void slotContactInfoChanged(const RecipientList &recipients);
 
 private:
 
@@ -94,12 +91,13 @@ bool RecentContactsModelPrivate::fillModel(int start, int end, QList<Event> even
     return true;
 }
 
-void RecentContactsModelPrivate::slotContactUpdated(quint32 localId,
-                                                    const QString &contactName,
-                                                    const QList<ContactAddress> &contactAddresses)
+void RecentContactsModelPrivate::slotContactInfoChanged(const RecipientList &recipients)
 {
-    EventModelPrivate::slotContactUpdated(localId, contactName, contactAddresses);
+    EventModelPrivate::slotContactInfoChanged(recipients);
 
+    // XXX This signal isn't emitted for all changes, and we don't have
+    // access to the full list of accounts from here.. ugh.
+#if 0
     bool hasAddressType[3] = { false, false, false };
     foreach (const ContactAddress &address, contactAddresses) {
         Q_ASSERT((address.type >= ContactListener::IMAccountType) && (address.type <= ContactListener::EmailAddressType));
@@ -114,11 +112,13 @@ void RecentContactsModelPrivate::slotContactUpdated(quint32 localId,
             typeSet[i]->remove(localId);
         }
     }
+#endif
 
     // FIXME: Contact updates can result in the model being wrong. But, because
     // unwanted events are discarded, that's difficult to solve without re-querying.
 }
 
+#if 0
 void RecentContactsModelPrivate::slotContactRemoved(quint32 localId)
 {
     EventModelPrivate::slotContactRemoved(localId);
@@ -138,6 +138,7 @@ void RecentContactsModelPrivate::slotContactRemoved(quint32 localId)
         }
     }
 }
+#endif
 
 void RecentContactsModelPrivate::prependEvents(QList<Event> events)
 {

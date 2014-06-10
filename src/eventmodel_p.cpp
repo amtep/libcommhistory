@@ -220,11 +220,19 @@ void EventModelPrivate::addToModel(const Event &event, bool sync)
     if (resolveContacts) {
         if (!addResolver) {
             addResolver = new ContactResolver(this);
-            connect(addResolver, SIGNAL(eventsResolved(QList<Event>)), SLOT(prependEvents(QList<Event>)));
+            connect(addResolver, SIGNAL(finished()), SLOT(addResolverFinished()));
         }
 
-        addResolver->prependEvents(QList<Event>() << event);
+        pendingAdded.prepend(event);
+        addResolver->add(event);
     }
+}
+
+void EventModelPrivate::addResolverFinished()
+{
+    QList<Event> added = pendingAdded;
+    pendingAdded.clear();
+    prependEvents(pendingAdded);
 }
 
 void EventModelPrivate::prependEvents(QList<Event> events)
@@ -311,13 +319,21 @@ void EventModelPrivate::eventsReceivedSlot(int start, int end, QList<Event> even
     if (resolveContacts && queryMode != EventModel::SyncQuery) {
         if (!receiveResolver) {
             receiveResolver = new ContactResolver(this);
-            connect(receiveResolver, SIGNAL(eventsResolved(QList<Event>)), SLOT(fillModel(QList<Event>)));
+            connect(receiveResolver, SIGNAL(finished()), SLOT(receiveResolverFinished()));
         }
 
-        receiveResolver->appendEvents(events);
+        pendingReceived.append(events);
+        receiveResolver->add(events);
     } else {
         fillModel(start, end, events);
     }
+}
+
+void EventModelPrivate::receiveResolverFinished()
+{
+    QList<Event> received = pendingReceived;
+    pendingReceived.clear();
+    fillModel(received);
 }
 
 void EventModelPrivate::modelUpdatedSlot(bool successful)
@@ -378,114 +394,30 @@ bool EventModelPrivate::canFetchMore() const
     return threadCanFetchMore;
 }
 
-void EventModelPrivate::changeContactsRecursive(ContactChangeType changeType,
-                                                quint32 contactId,
-                                                const QString &contactName,
-                                                const QList< QPair<QString,QString> > &contactAddresses,
-                                                EventTreeItem *parent)
+void EventModelPrivate::recipientsChangedRecursive(const QSet<Recipient> &recipients, EventTreeItem *parent)
 {
-    DEBUG() << Q_FUNC_INFO;
-
     for (int row = 0; row < parent->childCount(); row++) {
+        const Event &event(parent->eventAt(row));
+        EventTreeItem *child = parent->child(row);
 
-        Event *event = &(parent->eventAt(row));
-        bool eventChanged = false;
-        QList<Event::Contact> contacts = event->contacts();
-        bool addressMatchesList = ContactListener::addressMatchesList(event->localUid(),
-                                                                      event->remoteUid(),
-                                                                      contactAddresses);
-
-        // the contact was removed
-        if (changeType == ContactRemoved ||
-        // the contact was modified and address removed
-            (changeType == ContactUpdated && !addressMatchesList)) {
-
-            for (int i = 0; i < contacts.count(); i++) {
-                // if contact is already resolved, remove it from list
-                if ((quint32)contacts.at(i).first == contactId) {
-
-                    contacts.removeAt(i);
-                    eventChanged = true;
-                    break;
-                }
+        foreach (const Recipient &r, event.recipients()) {
+            if (recipients.contains(r)) {
+                // XXX coalesce
+                // XXX role dataChanged signal
+                emitDataChanged(row, child);
+                break;
             }
         }
 
-        // the contact was modified and the address was found
-        else if (changeType == ContactUpdated && addressMatchesList) {
-
-            // create new contact, i.e. <id, name> pair
-            Event::Contact newContact((int)contactId, contactName);
-
-            for (int i = 0; i < contacts.count(); i++) {
-                // if contact is already resolved, change name to new one
-                if ((quint32)contacts.at(i).first == contactId) {
-
-                    contacts[i].second = contactName;
-                    eventChanged = true;
-                    break;
-                }
-            }
-
-            // if event is not yet updated, then the contact hasn't been resolved yet -> add it to contacts
-            if (!eventChanged) {
-
-                contacts << newContact;
-                eventChanged = true;
-            }
-        }
-
-        else {
-
-            qWarning() << "unknown contact change type???";
-            break;
-        }
-
-        if (eventChanged) {
-
-            // save the modified list back to the event
-            event->setContacts(contacts);
-
-            emitDataChanged(row, parent->child(row));
-        }
-
-        // dig down to children
-        if (parent->child(row)->childCount()) {
-            changeContactsRecursive(changeType,
-                                    contactId,
-                                    contactName,
-                                    contactAddresses,
-                                    parent->child(row));
-        }
+        if (child->childCount())
+            recipientsChangedRecursive(recipients, child);
     }
 }
 
-void EventModelPrivate::slotContactUpdated(quint32 localId,
-                                           const QString &contactName,
-                                           const QList<ContactAddress> &contactAddresses)
+void EventModelPrivate::slotContactInfoChanged(const RecipientList &recipients)
 {
-    Event::Contact contact(localId, contactName);
-
-    QList<QPair<QString, QString> > uidPairs;
-    foreach (const ContactAddress &address, contactAddresses) {
-        uidPairs.append(address.uidPair());
-    }
-
-    changeContactsRecursive(ContactUpdated, localId, contactName, uidPairs, eventRootItem);
-}
-
-void EventModelPrivate::slotContactRemoved(quint32 localId)
-{
-    changeContactsRecursive(ContactRemoved,
-                            localId,
-                            QString(), // contactName
-                            QList<QPair<QString,QString> >(), // contactAddresses
-                            eventRootItem);
-}
-
-void EventModelPrivate::slotContactUnknown(const QPair<QString, QString> &address)
-{
-    Q_UNUSED(address)
+    QSet<Recipient> changed = QSet<Recipient>::fromList(recipients.recipients());
+    recipientsChangedRecursive(changed, eventRootItem);
 }
 
 DatabaseIO* EventModelPrivate::database()
@@ -502,20 +434,8 @@ void EventModelPrivate::setResolveContacts(bool enabled)
     if (resolveContacts && !contactListener) {
         contactListener = ContactListener::instance();
         connect(contactListener.data(),
-                SIGNAL(contactUpdated(quint32, const QString&, const QList<ContactAddress>&)),
-                this,
-                SLOT(slotContactUpdated(quint32, const QString&, const QList<ContactAddress>&)),
-                Qt::UniqueConnection);
-        connect(contactListener.data(),
-                SIGNAL(contactRemoved(quint32)),
-                this,
-                SLOT(slotContactRemoved(quint32)),
-                Qt::UniqueConnection);
-        connect(contactListener.data(),
-                SIGNAL(contactUnknown(const QPair<QString, QString>&)),
-                this,
-                SLOT(slotContactUnknown(const QPair<QString, QString>&)),
-                Qt::UniqueConnection);
+                SIGNAL(contactInfoChanged(RecipientList)),
+                SLOT(slotContactInfoChanged(RecipientList)));
     } else if (!resolveContacts && contactListener) {
         disconnect(contactListener.data(), 0, this, 0);
         contactListener.clear();
