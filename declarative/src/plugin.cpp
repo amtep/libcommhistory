@@ -41,7 +41,6 @@
 #include "conversationproxymodel.h"
 #include "recentcontactsmodel.h"
 #include "declarativegroupmanager.h"
-#include "contactaddresslookup.h"
 #include "classzerosmsmodel.h"
 #include "draftsmodel.h"
 #include "draftevent.h"
@@ -74,7 +73,6 @@ public:
         qmlRegisterType<CommHistory::ContactGroupModel>(uri, 1, 0, "CommContactGroupModel");
         qmlRegisterType<CommHistory::RecentContactsModel>(uri, 1, 0, "CommRecentContactsModel");
         qmlRegisterType<DeclarativeGroupManager>(uri, 1, 0, "CommGroupManager");
-        qmlRegisterType<ContactAddressLookup>(uri, 1, 0, "ContactAddressLookup");
         qmlRegisterType<CommHistory::ClassZeroSMSModel>(uri, 1, 0, "ClassZeroSMSModel");
         qmlRegisterType<CommHistory::DraftsModel>(uri, 1, 0, "DraftsModel");
         qmlRegisterType<DraftEvent>(uri, 1, 0, "DraftEvent");
