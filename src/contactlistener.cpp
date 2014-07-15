@@ -83,6 +83,7 @@ void ContactListenerPrivate::resolveAgain(const Recipient &recipient)
         retryResolver->setForceResolving(true);
         connect(retryResolver, SIGNAL(finished()), SLOT(retryFinished()));
     }
+    DEBUG() << "RetryResolver looking at" << recipient;
     retryRecipients.append(recipient);
     retryResolver->add(recipient);
 }
@@ -90,6 +91,8 @@ void ContactListenerPrivate::resolveAgain(const Recipient &recipient)
 void ContactListenerPrivate::retryFinished()
 {
     Q_Q(ContactListener);
+    foreach (const Recipient &r, retryRecipients)
+        DEBUG() << "RetryResolver result:" << r;
     emit q->contactChanged(retryRecipients);
     emit q->contactInfoChanged(retryRecipients);
     emit q->contactDetailsChanged(retryRecipients);
@@ -147,11 +150,12 @@ void ContactListenerPrivate::itemUpdated(SeasideCache::CacheItem *item)
     QList<Recipient> recipients = Recipient::recipientsForContact(item->iid);
     foreach (const Recipient &recipient, recipients) {
         if (!recipientMatchesDetails(recipient, addresses, phoneNumbers)) {
-            DEBUG() << "Recipient" << recipient.remoteUid() << "no longer matches contact" << item->iid;
+            DEBUG() << "Recipient" << recipient << "no longer matches contact" << item->iid;
             // Try to resolve again to find a new match before emitting signals
             resolveAgain(recipient);
         } else {
             if (recipient.contactName() != displayName) {
+                DEBUG() << "Recipient" << recipient << "changed name";
                 recipient.setResolvedContact(item->iid, displayName);
                 // XXX combine signal
                 emit q->contactInfoChanged(recipient);

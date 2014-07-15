@@ -130,6 +130,7 @@ bool ContactResolverPrivate::resolve(Recipient recipient)
     if (pending.contains(recipient))
         return false;
 
+    DEBUG() << "Resolve called for" << recipient;
     pending.insert(recipient);
     SeasideCache::CacheItem *item = 0;
     if (recipient.isPhoneNumber()) {
@@ -140,6 +141,7 @@ bool ContactResolverPrivate::resolve(Recipient recipient)
 
     if (item && (item->contactState == SeasideCache::ContactComplete)) {
         recipient.setResolvedContact(item->iid, contactName(item->contact));
+        DEBUG() << "Resolve returned result immediately" << recipient;
         return true;
     }
 
@@ -177,8 +179,12 @@ void ContactResolverPrivate::addressResolved(const QString &first, const QString
 
     if (it == pending.end()) {
         qWarning() << "Got addressResolved that doesn't match any pending resolve tasks:" << first << second << item;
+        foreach (const Recipient &r, pending)
+            qWarning() << "Candidate" << r.isPhoneNumber() << r.remoteUid();
         return;
     }
+
+    DEBUG() << "Resolved" << first << second << "to" << (item ? item->iid : -1) << (item ? contactName(item->contact) : QString());
 
     if (item)
         it->setResolvedContact(item->iid, contactName(item->contact));

@@ -22,6 +22,7 @@
 
 #include "recipient.h"
 #include "commonutils.h"
+#include "debug.h"
 #include <QSet>
 #include <QHash>
 #include <QDebug>
@@ -100,7 +101,7 @@ RecipientPrivate::RecipientPrivate(const QString &local, const QString &remote)
 
 RecipientPrivate::~RecipientPrivate()
 {
-    qDebug() << "destroyed" << this << localUid << remoteUid;
+    DEBUG() << "destroyed" << this << localUid << remoteUid;
     recipientInstances->remove(qMakePair(localUid, remoteUid.toLower()));
 }
 
@@ -110,10 +111,10 @@ QSharedPointer<RecipientPrivate> RecipientPrivate::get(const QString &localUid, 
     QSharedPointer<RecipientPrivate> instance = recipientInstances->value(uids);
     if (!instance) {
         instance = QSharedPointer<RecipientPrivate>(new RecipientPrivate(localUid, remoteUid));
-        qDebug() << "created" << instance << localUid << remoteUid;
+        DEBUG() << "created" << instance << localUid << remoteUid;
         recipientInstances->insert(uids, instance);
     } else
-        qDebug() << "from cache" << instance << localUid << remoteUid;
+        DEBUG() << "from cache" << instance << localUid << remoteUid;
     return instance;
 }
 

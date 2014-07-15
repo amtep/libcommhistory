@@ -26,7 +26,7 @@
 #include <QDebug>
 
 // Define this if you'd like to see debug messages from libcommhistory
-// #define DEBUG_COMMHISTORY
+#define DEBUG_COMMHISTORY
 #ifdef DEBUG_COMMHISTORY
 # define DEBUG qDebug
 #else
