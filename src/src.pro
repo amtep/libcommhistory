@@ -62,7 +62,10 @@ QT_LIKE_HEADERS += headers/CallEvent \
                    headers/RecentContactsModel \
                    headers/Events \
                    headers/Models \
-                   headers/DatabaseIO
+                   headers/DatabaseIO \
+                   headers/Recipient \
+                   headers/ContactResolver \
+                   headers/ContactListener
 
 include(sources.pri)
 
