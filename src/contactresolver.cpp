@@ -22,44 +22,30 @@
 
 #include "contactresolver.h"
 #include "debug.h"
+#include <seasidecache.h>
 
 using namespace CommHistory;
 
 namespace CommHistory {
 
-class ContactResolverPrivate : public QObject
+class ContactResolverPrivate : public QObject, public SeasideCache::ResolveListener
 {
     Q_OBJECT
     Q_DECLARE_PUBLIC(ContactResolver)
 
 public:
-    typedef ContactListener::ContactAddress ContactAddress;
-
-    struct PendingEvent {
-        Event event;
-        bool resolved;
-
-        PendingEvent(const Event &e)
-            : event(e), resolved(false)
-        { }
-    };
-
     ContactResolver *q_ptr;
-    QSharedPointer<ContactListener> listener;
-    QList<PendingEvent> events;
-    // Cache of localUid+remoteUid from events and the resulting contact, kept up to date with changes.
-    QHash<QPair<QString,QString>, Event::Contact> contactCache;
-    QSet<QPair<QString,QString> > pendingAddresses;
+    QSet<Recipient> pending;
+    bool resolving;
+    bool forceResolving;
 
     explicit ContactResolverPrivate(ContactResolver *parent);
 
-    bool resolveEvent(PendingEvent &event);
-    void checkIfResolved();
+    bool resolve(Recipient recipient);
+    virtual void addressResolved(const QString &first, const QString &second, SeasideCache::CacheItem *item);
 
 public slots:
-    void contactUpdated(quint32 localId, const QString &name, const QList<ContactAddress> &addresses);
-    void contactRemoved(quint32 localId);
-    void contactUnknown(const QPair<QString,QString> &address);
+    bool checkIfFinished();
 };
 
 }
@@ -70,201 +56,136 @@ ContactResolver::ContactResolver(QObject *parent)
 }
 
 ContactResolverPrivate::ContactResolverPrivate(ContactResolver *parent)
-    : QObject(parent), q_ptr(parent)
+    : QObject(parent), q_ptr(parent), resolving(false), forceResolving(false)
 {
-}
-
-QList<Event> ContactResolver::events() const
-{
-    Q_D(const ContactResolver);
-    QList<Event> re;
-    re.reserve(d->events.size());
-    foreach (const ContactResolverPrivate::PendingEvent &pe, d->events)
-        re.append(pe.event);
-    return re;
 }
 
 bool ContactResolver::isResolving() const
 {
     Q_D(const ContactResolver);
-    return !d->events.isEmpty();
+    return d->resolving;
 }
 
-void ContactResolver::appendEvents(const QList<Event> &events)
+bool ContactResolver::forceResolving() const
+{
+    Q_D(const ContactResolver);
+    return d->forceResolving;
+}
+
+void ContactResolver::setForceResolving(bool enabled)
+{
+    Q_D(ContactResolver);
+    d->forceResolving = enabled;
+}
+
+void ContactResolver::add(const Recipient &recipient)
+{
+    Q_D(ContactResolver);
+    if (!d->resolving) {
+        // On the first resolve, make a queued call to checkIfFinished.
+        // This handles asynchronously emitting the signal if nothing has
+        // to be resolved, to preserve API assumptions.
+        bool ok = d->metaObject()->invokeMethod(d, "checkIfFinished", Qt::QueuedConnection);
+        Q_UNUSED(ok);
+        Q_ASSERT(ok);
+    }
+
+    d->resolving = true;
+    d->resolve(recipient);
+}
+
+void ContactResolver::add(const RecipientList &recipients)
 {
     Q_D(ContactResolver);
 
-    bool resolved = true;
-    foreach (const Event &event, events) {
-        ContactResolverPrivate::PendingEvent e(event);
-        resolved &= d->resolveEvent(e);
-        d->events.append(e);
+    if (!d->resolving) {
+        bool ok = d->metaObject()->invokeMethod(d, "checkIfFinished", Qt::QueuedConnection);
+        Q_UNUSED(ok);
+        Q_ASSERT(ok);
     }
 
-    if (resolved)
-        d->checkIfResolved();
+    d->resolving = true;
+    foreach (const Recipient &recipient, recipients)
+        d->resolve(recipient);
 }
 
-void ContactResolver::prependEvents(const QList<Event> &events)
+static QString contactName(const QContact &contact)
 {
-    Q_D(ContactResolver);
-
-    bool resolved = true;
-    foreach (const Event &event, events) {
-        ContactResolverPrivate::PendingEvent e(event);
-        resolved &= d->resolveEvent(e);
-        d->events.prepend(e);
-    }
-
-    if (resolved)
-        d->checkIfResolved();
+    return SeasideCache::generateDisplayLabel(contact, SeasideCache::displayLabelOrder());
 }
 
 // Returns true if resolved immediately
-bool ContactResolverPrivate::resolveEvent(PendingEvent &e)
+bool ContactResolverPrivate::resolve(Recipient recipient)
 {
-    if (e.event.localUid().isEmpty() || e.event.remoteUid().isEmpty()) {
-        e.event.setContacts(QList<Event::Contact>());
-        e.resolved = true;
+    if (!forceResolving && recipient.isContactResolved())
+        return true;
+
+    Q_ASSERT(!recipient.localUid().isEmpty());
+    if (recipient.localUid().isEmpty() || recipient.remoteUid().isEmpty()) {
+        // Cannot match any contact. Set as resolved to nothing.
+        recipient.setResolvedContact(0, QString());
         return true;
     }
 
-    QPair<QString,QString> uidPair(e.event.localUid(), e.event.remoteUid());
-    QHash<QPair<QString,QString>, Event::Contact>::iterator it = contactCache.find(uidPair);
-    if (it != contactCache.end()) {
-        e.event.setContacts(QList<Event::Contact>() << *it);
-        e.resolved = true;
-        return true;
-    }
-
-    if (pendingAddresses.contains(uidPair))
+    if (pending.contains(recipient))
         return false;
-    pendingAddresses.insert(uidPair);
 
-    if (listener.isNull()) {
-        listener = ContactListener::instance();
-        connect(listener.data(), SIGNAL(contactUpdated(quint32,QString,QList<ContactAddress>)),
-                SLOT(contactUpdated(quint32,QString,QList<ContactAddress>)));
-        connect(listener.data(), SIGNAL(contactRemoved(quint32)), SLOT(contactRemoved(quint32)));
-        connect(listener.data(), SIGNAL(contactUnknown(QPair<QString,QString>)),
-                SLOT(contactUnknown(QPair<QString,QString>)));
+    pending.insert(recipient);
+    SeasideCache::CacheItem *item = 0;
+    if (recipient.isPhoneNumber()) {
+        item = SeasideCache::resolvePhoneNumber(this, recipient.remoteUid(), true);
+    } else {
+        item = SeasideCache::resolveOnlineAccount(this, recipient.localUid(), recipient.remoteUid(), true);
     }
 
-    listener->resolveContact(e.event.localUid(), e.event.remoteUid());
+    if (item && (item->contactState == SeasideCache::ContactComplete)) {
+        recipient.setResolvedContact(item->iid, contactName(item->contact));
+        return true;
+    }
+
     return false;
 }
 
-void ContactResolverPrivate::checkIfResolved()
+bool ContactResolverPrivate::checkIfFinished()
 {
     Q_Q(ContactResolver);
+    if (resolving && pending.isEmpty()) {
+        resolving = false;
+        emit q->finished();
+        return true;
+    }
+    return false;
+}
 
-    if (events.isEmpty())
+void ContactResolverPrivate::addressResolved(const QString &first, const QString &second, SeasideCache::CacheItem *item)
+{
+    QSet<Recipient>::iterator it = pending.end();
+
+    if (second.isEmpty()) {
+        qWarning() << "Got addressResolved with empty UIDs" << first << second << item;
         return;
-
-    foreach (const PendingEvent &e, events) {
-        if (!e.resolved)
-            return;
-    }
-
-    QList<Event> resolved;
-    resolved.reserve(events.size());
-    foreach (const PendingEvent &e, events)
-        resolved.append(e.event);
-    events.clear();
-
-    emit q->eventsResolved(resolved);
-    emit q->finished();
-}
-
-void ContactResolverPrivate::contactUpdated(quint32 localId, const QString &name, const QList<ContactAddress> &addresses)
-{
-    QHash<QPair<QString,QString>, Event::Contact>::iterator cacheIt = contactCache.begin();
-    while (cacheIt != contactCache.end()) {
-        const QPair<QString, QString> &uidPair(cacheIt.key());
-        Event::Contact &contact(cacheIt.value());
-
-        if (ContactListener::addressMatchesList(uidPair.first,  // local id
-                                                uidPair.second, // remote id
-                                                addresses)) {
-            if (quint32(contact.first) == localId) {
-                // change name for existing contact
-                contact.second = name;
-            } else {
-                qWarning() << "Duplicate contact match for address" << uidPair.first << uidPair.second << "with contacts" << contact.first << localId;
-            }
-        } else if (quint32(contact.first) == localId) {
-            // delete our record since the address doesn't match anymore
-            cacheIt = contactCache.erase(cacheIt);
-            continue;
+    } else if (first.isEmpty()) {
+        // Phone numbers have no localUid, search the set manually
+        for (it = pending.begin(); it != pending.end(); it++) {
+            // second should be identical to input, so string equality is ok
+            if (it->isPhoneNumber() && it->remoteUid() == second)
+                break;
         }
-
-        cacheIt++;
+    } else {
+        it = pending.find(Recipient(first, second));
     }
 
-    bool updated = false;
-    for (QList<PendingEvent>::iterator it = events.begin(), end = events.end(); it != end; it++) {
-        PendingEvent &e = *it;
-        QPair<QString,QString> uidPair(e.event.localUid(), e.event.remoteUid());
-
-        if (ContactListener::addressMatchesList(uidPair.first, uidPair.second, addresses)) {
-            Event::Contact contact(localId, name);
-            contactCache.insert(uidPair, contact);
-            e.event.setContacts(QList<Event::Contact>() << contact);
-            if (!e.resolved) {
-                pendingAddresses.remove(uidPair);
-                e.resolved = true;
-                updated = true;
-            }
-        }
+    if (it == pending.end()) {
+        qWarning() << "Got addressResolved that doesn't match any pending resolve tasks:" << first << second << item;
+        return;
     }
 
-    if (updated)
-        checkIfResolved();
-}
-
-void ContactResolverPrivate::contactRemoved(quint32 localId)
-{
-    QHash<QPair<QString,QString>, Event::Contact>::iterator cacheIt = contactCache.begin();
-    while (cacheIt != contactCache.end()) {
-        Event::Contact &contact(cacheIt.value());
-        if (quint32(contact.first) == localId) {
-            cacheIt = contactCache.erase(cacheIt);
-        } else {
-            cacheIt++;
-        }
-    }
-
-    for (QList<PendingEvent>::iterator it = events.begin(), end = events.end(); it != end; it++) {
-        PendingEvent &e = *it;
-        if (quint32(e.event.contactId()) == localId) {
-            e.event.setContacts(QList<Event::Contact>());
-        }
-    }
-}
-
-void ContactResolverPrivate::contactUnknown(const QPair<QString,QString> &address)
-{
-    QList<QPair<QString,QString> > addresses;
-    addresses << address;
-
-    bool updated = false;
-    for (QList<PendingEvent>::iterator it = events.begin(), end = events.end(); it != end; it++) {
-        PendingEvent &e = *it;
-        QPair<QString,QString> uidPair(e.event.localUid(), e.event.remoteUid());
-
-        if (ContactListener::addressMatchesList(uidPair.first, uidPair.second, addresses)) {
-            contactCache.insert(uidPair, Event::Contact(0, QString()));
-            e.event.setContacts(QList<Event::Contact>());
-            if (!e.resolved) {
-                pendingAddresses.remove(uidPair);
-                e.resolved = true;
-                updated = true;
-            }
-        }
-    }
-
-    if (updated)
-        checkIfResolved();
+    if (item)
+        it->setResolvedContact(item->iid, contactName(item->contact));
+    else
+        it->setResolvedContact(0, QString());
+    pending.erase(it);
+    checkIfFinished();
 }
 
 #include "contactresolver.moc"
