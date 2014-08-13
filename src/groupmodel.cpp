@@ -171,7 +171,6 @@ QHash<int, QByteArray> GroupModel::roleNames() const
     roles[BaseRole + EndTime] = "endTime";
     roles[BaseRole + UnreadMessages] = "unreadMessages";
     roles[BaseRole + LastEventId] = "lastEventId";
-    roles[BaseRole + Contacts] = "contacts";
     roles[BaseRole + LastMessageText] = "lastMessageText";
     roles[BaseRole + LastVCardFileName] = "lastVCardFileName";
     roles[BaseRole + LastVCardLabel] = "lastVCardLabel";
@@ -264,7 +263,7 @@ QVariant GroupModel::data(const QModelIndex &index, int role) const
     } else if (role == GroupObjectRole) {
         return QVariant::fromValue<QObject*>(group);
     } else if (role == ContactIdsRole) {
-        return QVariant::fromValue(group->contactIds());
+        return QVariant::fromValue<QList<int> >(group->recipients().contactIds());
     } else if (role == WeekdaySectionRole) {
         QDateTime dateTime = group->endTime().toLocalTime();
 
@@ -297,7 +296,7 @@ QVariant GroupModel::data(const QModelIndex &index, int role) const
             var = QVariant::fromValue(group->localUid());
             break;
         case RemoteUids:
-            var = QVariant::fromValue(group->remoteUids());
+            var = QVariant::fromValue(group->recipients().remoteUids());
             break;
         case ChatName:
             var = QVariant::fromValue(group->chatName());
@@ -310,9 +309,6 @@ QVariant GroupModel::data(const QModelIndex &index, int role) const
             break;
         case LastEventId:
             var = QVariant::fromValue(group->lastEventId());
-            break;
-        case Contacts:
-            var = QVariant::fromValue(group->contacts());
             break;
         case LastMessageText:
             var = QVariant::fromValue(group->lastMessageText());
@@ -385,9 +381,6 @@ QVariant GroupModel::headerData(int section,
                 break;
             case LastEventId:
                 name = QLatin1String("last_event_id");
-                break;
-            case Contacts:
-                name = QLatin1String("contacts");
                 break;
             case LastMessageText:
                 name = QLatin1String("last_message_text");

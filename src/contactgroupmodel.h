@@ -52,7 +52,7 @@ class LIBCOMMHISTORY_EXPORT ContactGroupModel : public QAbstractTableModel
 public:
     enum ColumnId {
         ContactIds,
-        ContactNames,
+        DisplayNames,
         EndTime,
         UnreadMessages,
         LastEventGroup,

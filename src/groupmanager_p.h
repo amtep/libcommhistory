@@ -31,6 +31,7 @@
 #include "eventmodel.h"
 #include "group.h"
 #include "contactlistener.h"
+#include "contactresolver.h"
 
 namespace CommHistory {
 
@@ -44,8 +45,6 @@ class GroupManagerPrivate : public QObject
     Q_DECLARE_PUBLIC(GroupManager)
 
 public:
-    typedef ContactListener::ContactAddress ContactAddress;
-
     GroupManager *q_ptr;
 
     GroupManagerPrivate(GroupManager *parent = 0);
@@ -61,7 +60,6 @@ public:
     bool commitTransaction(const QList<int> &groupIds);
 
     DatabaseIO* database();
-    void startContactListening();
 
 public Q_SLOTS:
     void eventsAddedSlot(const QList<CommHistory::Event> &events);
@@ -73,11 +71,8 @@ public Q_SLOTS:
 
     void groupsDeletedSlot(const QList<int> &groupIds);
 
-    void slotContactUpdated(quint32 localId,
-                            const QString &contactName,
-                            const QList<ContactAddress> &contactAddresses);
-
-    void slotContactRemoved(quint32 localId);
+    void slotContactInfoChanged(const RecipientList &recipients);
+    void contactResolveFinished();
 
 public:
     EventModel::QueryMode queryMode;
@@ -94,8 +89,11 @@ public:
     QThread *bgThread;
 
     QSharedPointer<ContactListener> contactListener;
-    bool contactChangesEnabled;
+    ContactResolver *contactResolver;
+    bool resolveContacts;
     QSharedPointer<UpdatesEmitter> emitter;
+
+    QList<Group> pendingResolve;
 };
 
 }

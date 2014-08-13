@@ -62,7 +62,6 @@ public:
         EndTime,
         UnreadMessages,
         LastEventId,
-        Contacts,
         LastMessageText,
         LastVCardFileName,
         LastVCardLabel,

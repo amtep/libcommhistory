@@ -42,7 +42,6 @@ static const int defaultChunkSize = 50;
 }
 
 using namespace CommHistory;
-typedef ContactListener::ContactAddress ContactAddress;
 
 GroupManagerPrivate::GroupManagerPrivate(GroupManager *manager)
         : q_ptr(manager)
@@ -55,7 +54,8 @@ GroupManagerPrivate::GroupManagerPrivate(GroupManager *manager)
         , filterLocalUid(QString())
         , filterRemoteUid(QString())
         , bgThread(0)
-        , contactChangesEnabled(true)
+        , contactResolver(0)
+        , resolveContacts(false)
 {
     qRegisterMetaType<QList<CommHistory::Event> >();
     qRegisterMetaType<QList<CommHistory::Group> >();
@@ -126,12 +126,6 @@ void GroupManagerPrivate::modifyInModel(Group &group, bool query)
         Group newGroup;
         if (!database()->getGroup(group.id(), newGroup))
             return;
-
-        // preserve contact info if necessary
-        if (!newGroup.validProperties().contains(Group::Contacts)
-            && go->validProperties().contains(Group::Contacts)) {
-            newGroup.setContacts(go->contacts());
-        }
         go->set(newGroup);
     } else {
         go->copyValidProperties(group);
@@ -172,38 +166,6 @@ void GroupManagerPrivate::eventsAddedSlot(const QList<Event> &events)
             go->setLastEventIsDraft(event.isDraft());
             go->setStartTime(event.startTime());
             go->setEndTime(event.endTime());
-
-            if ((event.type() == Event::SMSEvent || event.type() == Event::MMSEvent) &&
-                !event.remoteUid().isEmpty() &&
-                !CommHistory::remoteAddressMatch(event.localUid(), go->remoteUids().first(), event.remoteUid())) {
-
-                DEBUG() << __PRETTY_FUNCTION__ << "Update group remote UIDs";
-                QStringList updatedUids;
-                foreach (const QString& uid, go->remoteUids()) {
-                    if (CommHistory::remoteAddressMatch(event.localUid(), uid, event.remoteUid())) {
-                        updatedUids << event.remoteUid();
-                    } else {
-                        updatedUids << uid;
-                    }
-                }
-                go->setRemoteUids(updatedUids);
-            }
-        }
-
-        bool found = false;
-        foreach (const QString &uid, go->remoteUids()) {
-            if (CommHistory::remoteAddressMatch(event.localUid(), uid, event.remoteUid())) {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            QStringList uids = go->remoteUids() << event.remoteUid();
-            // TODO for future improvement: have separate properties for
-            // tpTargetId and remoteUids. Meanwhile, just use the first
-            // id as target.
-            go->setRemoteUids(uids);
         }
 
         if (!event.isRead())
@@ -223,21 +185,27 @@ void GroupManagerPrivate::groupsAddedSlot(const QList<CommHistory::Group> &added
         // If the group has not been added to the model, add it.
         if (!go
             && (filterLocalUid.isEmpty() || group.localUid() == filterLocalUid)
-            && !group.remoteUids().isEmpty()
+            && !group.recipients().isEmpty()
             && (filterRemoteUid.isEmpty()
-                || CommHistory::remoteAddressMatch(group.localUid(), filterRemoteUid, group.remoteUids().first()))) {
+                || group.recipients() == Recipient(group.localUid(), filterRemoteUid))) {
             go = new GroupObject(group, q);
             groups.insert(group.id(), go);
             emit q->groupAdded(go);
         }
 
-        if (go) {
-            // Start contact resolving if we are interested listening contacts
-            // and the contacts are not yet being resolved.
-            startContactListening();
-            if (contactListener && !go->remoteUids().isEmpty())
-                contactListener->resolveContact(go->localUid(),
-                                                go->remoteUids().first());
+        if (resolveContacts) {
+            if (!contactResolver) {
+                contactResolver = new ContactResolver(this);
+                connect(contactResolver, SIGNAL(finished()),
+                        this, SLOT(contactResolveFinished()));
+            }
+
+            pendingResolve.append(group);
+            contactResolver->add(group);
+        } else if (!groups.contains(group.id())) {
+            GroupObject *go = new GroupObject(group, q);
+            groups.insert(group.id(), go);
+            emit q->groupAdded(go);
         }
     }
 }
@@ -291,109 +259,19 @@ DatabaseIO* GroupManagerPrivate::database()
     return DatabaseIO::instance();
 }
 
-void GroupManagerPrivate::slotContactUpdated(quint32 localId,
-                                           const QString &contactName,
-                                           const QList<ContactAddress> &contactAddresses)
+void GroupManagerPrivate::slotContactInfoChanged(const RecipientList &recipients)
 {
     Q_Q(GroupManager);
 
-    foreach (GroupObject *group, groups) {
-        bool updatedGroup = false;
-        // NOTE: this is value copy, modifications need to be saved to group
-        QList<Event::Contact> resolvedContacts = group->contacts();
-
-        // if we already keep track of this contact and the address is in the provided matching addresses list
-        if (ContactListener::addressMatchesList(group->localUid(),
-                                                group->remoteUids().first(),
-                                                contactAddresses)) {
-
-            // check if contact is already resolved and stored in group
-            for (int i = 0; i < resolvedContacts.count(); i++) {
-
-                // if yes, then just exchange the contactname
-                if ((quint32)resolvedContacts.at(i).first == localId) {
-
-                    // modify contacts list, save it to group later
-                    resolvedContacts[i].second = contactName;
-                    updatedGroup = true;
-                    break;
-                }
-            }
-
-            // if not yet in group, then add it there
-            if (!updatedGroup) {
-
-                // modify contacts list, save it to group later
-                resolvedContacts << Event::Contact(localId, contactName);
-            }
-
-            updatedGroup = true;
-        }
-
-        // otherwise we either don't keep track of the contact
-        // or the address was removed from the contact and that is why it's not in the provided matching addresses list
-        else {
-
-            // check if contact is already resolved and stored in group
-            for (int i = 0; i < resolvedContacts.count(); i++) {
-
-                // if yes, then remove it from there
-                if ((quint32)resolvedContacts.at(i).first == localId) {
-
-                    // modify contacts list, save it to group later
-                    resolvedContacts.removeAt(i);
-                    updatedGroup = true;
-                    break;
-                }
-            }
-        }
-
-        if (updatedGroup) {
-            group->setContacts(resolvedContacts);
-            emit q->groupUpdated(group);
-        }
-    }
-}
-
-void GroupManagerPrivate::slotContactRemoved(quint32 localId)
-{
-    Q_Q(GroupManager);
+    QSet<Recipient> changed = QSet<Recipient>::fromList(recipients.recipients());
 
     foreach (GroupObject *group, groups) {
-        bool updatedGroup = false;
-        // NOTE: this is value copy, modifications need to be saved to group
-        QList<Event::Contact> resolvedContacts = group->contacts();
-
-        // check if contact is already resolved and stored in group
-        for (int i = 0; i < resolvedContacts.count(); i++) {
-            // if yes, then remove it from there
-            if ((quint32)resolvedContacts.at(i).first == localId) {
-                // modify contacts list, save it to group later
-                resolvedContacts.removeAt(i);
-                updatedGroup = true;
+        foreach (const Recipient &r, group->recipients()) {
+            if (changed.contains(r)) {
+                emit q->groupUpdated(group);
                 break;
             }
         }
-
-        if (updatedGroup) {
-            group->setContacts(resolvedContacts);
-            emit q->groupUpdated(group);
-        }
-    }
-}
-
-void GroupManagerPrivate::startContactListening()
-{
-    if (contactChangesEnabled && !contactListener) {
-        contactListener = ContactListener::instance();
-        connect(contactListener.data(),
-                SIGNAL(contactUpdated(quint32, const QString&, const QList<ContactAddress>&)),
-                this,
-                SLOT(slotContactUpdated(quint32, const QString&, const QList<ContactAddress>&)));
-        connect(contactListener.data(),
-                SIGNAL(contactRemoved(quint32)),
-                this,
-                SLOT(slotContactRemoved(quint32)));
     }
 }
 
@@ -446,9 +324,9 @@ GroupObject *GroupManager::findGroup(const QString &localUid, const QString &rem
 
 GroupObject *GroupManager::findGroup(const QString &localUid, const QStringList &remoteUids) const
 {
+    RecipientList match = RecipientList::fromUids(localUid, remoteUids);
     foreach (GroupObject *g, d->groups) {
-        if (g->localUid() == localUid && g->remoteUids().size() == remoteUids.size()
-                && CommHistory::remoteAddressMatch(localUid, g->remoteUids(), remoteUids))
+        if (g->localUid() == localUid && g->recipients() == match)
             return g;
     }
 
@@ -481,7 +359,7 @@ bool GroupManager::addGroup(Group &group)
 
     if ((d->filterLocalUid.isEmpty() || group.localUid() == d->filterLocalUid)
         && (d->filterRemoteUid.isEmpty()
-            || CommHistory::remoteAddressMatch(group.localUid(), d->filterRemoteUid, group.remoteUids().first()))) {
+            || group.recipients() == Recipient(group.localUid(), d->filterRemoteUid))) {
         d->add(group);
     }
 
@@ -509,7 +387,7 @@ bool GroupManager::addGroups(QList<Group> &groups)
 
         if ((d->filterLocalUid.isEmpty() || group.localUid() == d->filterLocalUid)
             && (d->filterRemoteUid.isEmpty()
-                || CommHistory::remoteAddressMatch(group.localUid(), d->filterRemoteUid, group.remoteUids().first()))) {
+                || group.recipients() == Recipient(group.localUid(), d->filterRemoteUid))) {
             d->add(group);
         }
 
@@ -566,8 +444,6 @@ bool GroupManager::getGroups(const QString &localUid,
         d->groups.clear();
     }
 
-    d->startContactListening();
-
     QString queryOrder;
     if (d->queryLimit > 0)
         queryOrder += QString::fromLatin1("LIMIT %1 ").arg(d->queryLimit);
@@ -578,17 +454,51 @@ bool GroupManager::getGroups(const QString &localUid,
     if (!d->database()->getGroups(localUid, remoteUid, results, queryOrder))
         return false;
 
-    foreach (Group g, results) {
-        GroupObject *go = new GroupObject(g, this);
-        d->groups.insert(g.id(), go);
-        emit groupAdded(go);
+    if (d->resolveContacts && d->queryMode != EventModel::SyncQuery) {
+        if (!d->contactResolver) {
+            d->contactResolver = new ContactResolver(this);
+            connect(d->contactResolver, SIGNAL(finished()),
+                    d, SLOT(contactResolveFinished()));
+        }
+
+        d->pendingResolve.append(results);
+        d->contactResolver->add(results);
+    } else {
+        foreach (Group g, results) {
+            GroupObject *go = new GroupObject(g, this);
+            d->groups.insert(g.id(), go);
+            emit groupAdded(go);
+        }
+
+        if (!d->isReady) {
+            d->isReady = true;
+            emit modelReady(true);
+        }
     }
 
-    if (!d->isReady) {
-        d->isReady = true;
-        emit modelReady(true);
-    }
     return true;
+}
+
+void GroupManagerPrivate::contactResolveFinished()
+{
+    Q_Q(GroupManager);
+
+    QList<Group> results = pendingResolve;
+    pendingResolve.clear();
+
+    DEBUG() << "Finished resolving" << results.size() << "groups";
+
+    foreach (const Group &g, results) {
+        GroupObject *go = groups.value(g.id());
+        if (!go) {
+            go = new GroupObject(g, q);
+            DEBUG() << g.id() << g.recipients().debugString();
+            groups.insert(g.id(), go);
+            emit q->groupAdded(go);
+        } else {
+            emit q->groupUpdated(go);
+        }
+    }
 }
 
 bool GroupManager::markAsReadGroup(int id)
@@ -724,7 +634,26 @@ DatabaseIO& GroupManager::databaseIO()
     return *d->database();
 }
 
-void GroupManager::enableContactChanges(bool enabled)
+bool GroupManager::resolveContacts() const
 {
-    d->contactChangesEnabled = enabled;
+    return d->resolveContacts;
 }
+
+void GroupManager::setResolveContacts(bool enabled)
+{
+    if (d->resolveContacts == enabled)
+        return;
+    d->resolveContacts = enabled;
+
+    if (d->resolveContacts && !d->contactListener) {
+        d->contactListener = ContactListener::instance();
+        connect(d->contactListener.data(),
+                SIGNAL(contactInfoChanged(RecipientList)),
+                d,
+                SLOT(slotContactInfoChanged(RecipientList)));
+    } else if (!d->resolveContacts && d->contactListener) {
+        disconnect(d->contactListener.data(), 0, d, 0);
+        d->contactListener.clear();
+    }
+}
+
