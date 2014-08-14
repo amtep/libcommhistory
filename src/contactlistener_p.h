@@ -29,43 +29,27 @@
 
 namespace CommHistory {
 
+class ContactResolver;
+
 class ContactListenerPrivate
     : public QObject,
-      public SeasideCache::ResolveListener,
       public SeasideCache::ChangeListener
 {
     Q_OBJECT
     Q_DECLARE_PUBLIC(ContactListener)
 
 public:
-    typedef ContactListener::ContactAddress ContactAddress;
-
-    template<typename T1, typename T2, typename T3> static
-    ContactAddress makeContactAddress(T1 localUid, T2 remoteUid, T3 type) {
-        ContactAddress addr;
-        addr.localUid = localUid;
-        addr.remoteUid = remoteUid;
-        addr.type = type;
-        return addr;
-    }
-
     ContactListenerPrivate(ContactListener *q);
     virtual ~ContactListenerPrivate();
 
-    QHash<QPair<QString, QString>, QPair<QString, QString> > m_pending;
+    ContactResolver *retryResolver;
+    QList<Recipient> retryRecipients;
 
-    QList<ContactAddress> contactAddresses(const QContact &contact) const;
-    QString contactName(const QContact &contact) const;
-
-Q_SIGNALS:
-    // Private:
-    void contactAlreadyInCache(quint32 localId,
-                               const QString &contactName,
-                               const QList<ContactAddress> &contactAddresses);
-    void contactAlreadyUnknown(const QPair<QString,QString> &address);
+private slots:
+    void retryFinished();
+    void resolveAgain(const CommHistory::Recipient &recipient);
 
 protected:
-    void addressResolved(const QString &first, const QString &second, SeasideCache::CacheItem *item);
     void itemUpdated(SeasideCache::CacheItem *item);
     void itemAboutToBeRemoved(SeasideCache::CacheItem *item);
 
