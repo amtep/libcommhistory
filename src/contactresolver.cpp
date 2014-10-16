@@ -223,6 +223,8 @@ void ContactResolverPrivate::checkIfResolved()
 
 void ContactResolverPrivate::contactUpdated(quint32 localId, const QString &name, const QList<ContactAddress> &addresses)
 {
+    qDebug() << "Updated" << localId << name << "at" << resolveTimer.elapsed() << "msec";
+
     // normalized addresses for this contact that are relevant to
     // the events being resolved.
     QSet<UidPair> updated;
@@ -256,6 +258,8 @@ void ContactResolverPrivate::contactUpdated(quint32 localId, const QString &name
         resolvedIds.insert(localId, updated);
 
     checkIfResolved();
+
+    qDebug() << "Done" << localId << name << "at" << resolveTimer.elapsed() << "msec";
 }
  
 void ContactResolverPrivate::contactRemoved(quint32 localId)
