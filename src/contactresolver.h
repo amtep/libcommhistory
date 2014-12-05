@@ -25,7 +25,6 @@
 
 #include <QObject>
 #include "event.h"
-#include "contactlistener.h"
 #include "libcommhistoryexport.h"
 
 namespace CommHistory {

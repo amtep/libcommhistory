@@ -24,8 +24,17 @@
 
 #include <QElapsedTimer>
 
+#include <seasidecache.h>
+
 #include "commonutils.h"
 #include "debug.h"
+
+// The resolver will take a list of events and ask the SeasideCache to resolve their
+// addresses to contacts.
+//
+// When all events are either resolved as unknown or resolved to a contact, the
+// resolver will emit eventsResolved(QList<Event>) and finished() signals.
+// The events passed to eventsResolved will have valid contacts() lists.
 
 using namespace CommHistory;
 
@@ -33,28 +42,31 @@ namespace CommHistory {
 
 typedef QPair<QString, QString> UidPair;
 
-class ContactResolverPrivate : public QObject
+// Implementation logic:
+// - Normalize and minimize the addresses in the events before requesting
+//   address resolution, to minimize the number of requests.
+// - Assume one addressResolved callback for each request made, and just count
+//   them to track completion.
+// - When all resolve requests are complete, query the best match for every event
+//   by passing the un-minimized addresses to itemByXXX functions. This gets the
+//   best match in cases where a minimized phone number matches multiple contacts.
+// - Then hand the events list over to the event model (via the eventsResolved signal).
+//   The event model becomes responsible for tracking any changes to contacts.
+//   The resolver avoids having to track these by only querying the cache when it's done.
+
+class ContactResolverPrivate : public QObject, public SeasideCache::ResolveListener
 {
     Q_OBJECT
     Q_DECLARE_PUBLIC(ContactResolver)
 
 public:
-    typedef ContactListener::ContactAddress ContactAddress;
-
     ContactResolver *q_ptr;
-    QSharedPointer<ContactListener> listener;
     QList<Event> events; // events to be resolved
 
-    // All uidpairs relevant to events
+    // All uidpairs submitted for address resolution
     QSet<UidPair> requestedAddresses;
-    // Addresses with known contacts; in case of multiple contacts for
-    // one address, the most recent contactUpdated one is kept.
-    // Only addresses in requestedAddresses are tracked.
-    QHash<UidPair, Event::Contact> resolvedAddresses;
-    // Reverse mapping for resolvedAddresses
-    QHash<quint32, QSet<UidPair> > resolvedIds;
-    // Addresses still expecting a contactUpdated / contactUnknown
-    QSet<UidPair> pendingAddresses;
+    // how many have completed
+    int resolvedAddresses;
 
     QElapsedTimer resolveTimer;
 
@@ -67,14 +79,11 @@ public:
     // Return a localUid/remoteUid pair in a form that can be
     // used for comparisons and set/hash lookups.
     static UidPair foldedAddress(const QString &localUid, const QString &remoteUid);
-    static UidPair foldedAddress(const ContactAddress &address);
     static UidPair foldedEventAddress(const Event &event);
     static UidPair foldedEventAddress(const QString &localUid, const QString &remoteUid);
 
-public slots:
-    void contactUpdated(quint32 localId, const QString &name, const QList<ContactAddress> &addresses);
-    void contactRemoved(quint32 localId);
-    void contactUnknown(const QPair<QString, QString> &address);
+    // ResolveListener callback from SeasideCache
+    virtual void addressResolved(const QString &first, const QString &second, SeasideCache::CacheItem *);
 };
 
 } // namespace CommHistory
@@ -85,7 +94,7 @@ ContactResolver::ContactResolver(QObject *parent)
 }
 
 ContactResolverPrivate::ContactResolverPrivate(ContactResolver *parent)
-    : QObject(parent), q_ptr(parent)
+    : QObject(parent), q_ptr(parent), resolvedAddresses(0)
 {
 }
 
@@ -141,17 +150,19 @@ void ContactResolverPrivate::resolveEvent(const Event &event)
     if (requestedAddresses.contains(uidPair))
         return;
     requestedAddresses.insert(uidPair);
-    pendingAddresses.insert(uidPair);
 
-    if (listener.isNull()) {
-        listener = ContactListener::instance();
-        connect(listener.data(), SIGNAL(contactUpdated(quint32,QString,QList<ContactAddress>)),
-                SLOT(contactUpdated(quint32,QString,QList<ContactAddress>)));
-        connect(listener.data(), SIGNAL(contactRemoved(quint32)), SLOT(contactRemoved(quint32)));
-        connect(listener.data(), SIGNAL(contactUnknown(QPair<QString,QString>)),
-                SLOT(contactUnknown(QPair<QString,QString>)));
-    }
-    listener->resolveContact(event.localUid(), event.remoteUid());
+    if (uidPair.first.isEmpty())
+        SeasideCache::resolvePhoneNumber(this, uidPair.second, true);
+    else if (uidPair.second.isEmpty())
+        SeasideCache::resolveEmailAddress(this, uidPair.first, true);
+    else
+        SeasideCache::resolveOnlineAccount(this, uidPair.first, uidPair.second, true);
+}
+
+void ContactResolverPrivate::addressResolved(const QString &, const QString &, SeasideCache::CacheItem *)
+{
+    resolvedAddresses++;
+    checkIfResolved();
 }
 
 QList<Event> ContactResolverPrivate::applyResolvedContacts() const
@@ -162,12 +173,24 @@ QList<Event> ContactResolverPrivate::applyResolvedContacts() const
     QList<Event>::iterator it = resolved.begin(), end = resolved.end();
     for ( ; it != end; ++it) {
         Event &event(*it);
-        UidPair uidPair(foldedEventAddress(event));
-        QHash<UidPair, Event::Contact>::const_iterator found = resolvedAddresses.find(uidPair);
-        if (found != resolvedAddresses.end())
-            event.setContacts(QList<Event::Contact>() << *found);
+        QString localUid(event.localUid());
+        QString remoteUid(event.remoteUid());
+
+        // Ask the cache for the best matching contact for each event.
+        SeasideCache::CacheItem *item;
+        if (localUidComparesPhoneNumbers(localUid))
+            item = SeasideCache::itemByPhoneNumber(remoteUid, true);
+        else if (remoteUid.isEmpty())
+            item = SeasideCache::itemByEmailAddress(localUid, true);
         else
+            item = SeasideCache::itemByOnlineAccount(localUid, remoteUid, true);
+
+        if (item) {
+            QString label = SeasideCache::generateDisplayLabel(item->contact, SeasideCache::displayLabelOrder());
+            event.setContacts(QList<Event::Contact>() << qMakePair(item->iid, label));
+        } else {
             event.setContacts(QList<Event::Contact>());
+        }
     }
     return resolved;
 }
@@ -182,11 +205,6 @@ UidPair ContactResolverPrivate::foldedAddress(const QString &localUid, const QSt
     }
     return qMakePair(localUid.toCaseFolded(),
                      remoteUid.toCaseFolded());
-}
-
-UidPair ContactResolverPrivate::foldedAddress(const ContactAddress &address)
-{
-    return foldedAddress(address.localUid, address.remoteUid);
 }
 
 UidPair ContactResolverPrivate::foldedEventAddress(const QString &localUid, const QString &remoteUid)
@@ -209,7 +227,7 @@ void ContactResolverPrivate::checkIfResolved()
     if (events.isEmpty())
         return;
 
-    if (!pendingAddresses.isEmpty())
+    if (resolvedAddresses < requestedAddresses.size())
         return;
 
     QList<Event> resolved = applyResolvedContacts();
@@ -219,65 +237,6 @@ void ContactResolverPrivate::checkIfResolved()
 
     emit q->eventsResolved(resolved);
     emit q->finished();
-}
-
-void ContactResolverPrivate::contactUpdated(quint32 localId, const QString &name, const QList<ContactAddress> &addresses)
-{
-    // normalized addresses for this contact that are relevant to
-    // the events being resolved.
-    QSet<UidPair> updated;
-
-    foreach (const ContactAddress &address, addresses) {
-        UidPair uidPair(foldedAddress(address));
-        if (!requestedAddresses.contains(uidPair))
-            continue;
-        updated.insert(uidPair);
-
-        if (resolvedAddresses.contains(uidPair)) {
-            quint32 oldId = resolvedAddresses.value(uidPair).first;
-            if (oldId != localId && resolvedIds.contains(oldId))
-                resolvedIds[oldId].remove(uidPair);
-        }
-
-        Event::Contact contact(localId, name);
-        resolvedAddresses.insert(uidPair, contact);
-        pendingAddresses.remove(uidPair);
-    }
-
-    // Deal with addresses that no longer resolve to this contact
-    foreach (const UidPair &uidPair, resolvedIds.value(localId)) {
-        if (!updated.contains(uidPair))
-            resolvedAddresses.remove(uidPair);
-    }
-
-    if (updated.isEmpty())
-        resolvedIds.remove(localId);
-    else
-        resolvedIds.insert(localId, updated);
-
-    checkIfResolved();
-}
- 
-void ContactResolverPrivate::contactRemoved(quint32 localId)
-{
-    if (!resolvedIds.contains(localId))
-        return;
-
-    foreach (const UidPair &uidPair, resolvedIds.value(localId)) {
-        resolvedAddresses.remove(uidPair);
-    }
-
-    resolvedIds.remove(localId);
-}
-
-void ContactResolverPrivate::contactUnknown(const QPair<QString, QString> &address)
-{
-    // ContactListener goes out of its way to give us an address in
-    // raw event format instead of the kind given in ContactAddress,
-    // so call foldedEventAddress rather than foldedAddress.
-    UidPair uidPair = foldedEventAddress(address.first, address.second);
-    if (pendingAddresses.remove(uidPair))
-        checkIfResolved();
 }
 
 #include "contactresolver.moc"
